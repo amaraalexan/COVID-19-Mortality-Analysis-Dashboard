@@ -1,0 +1,1811 @@
+---
+title: "COVID Mortality Dashboard Report"
+output: html_document
+params:
+  apikey: "YOUR API-KEY"
+  state: "YOUR STATE"
+  county: "YOUR COUNTY"
+  popscale: "100000"
+---
+
+```{r setup, include=FALSE}
+# Loading/installing required packages
+req.packages <- c("tidyverse", 
+                  "ISOweek", 
+                  "lubridate", 
+                  "tidycensus",
+                  "dplyr", 
+                  "excessmort", 
+                  "ggplot2", 
+                  "hrbrthemes",
+                  "ggpubr", 
+                  "tmap",
+                  "tigris",
+                  "sf",
+                  "rmapshaper",
+                  "gridExtra", 
+                  "cowplot",
+                  "knitr",
+                  "kableExtra", 
+                  "surveillance", 
+                  "plotly")
+
+installed_packages <- req.packages %in% rownames(installed.packages())
+if (any(installed_packages == FALSE)) {
+  install.packages(req.packages[!installed_packages], dependencies = TRUE, INSTALL_opts = "--no-lock", repos = "http://cran.us.r-project.org")
+}
+
+invisible(lapply(req.packages, library, character.only = TRUE))
+
+knitr::opts_chunk$set(comment = NA)
+
+```
+
+```{r col-check, echo = FALSE, message = FALSE, warning = FALSE}
+# Load individual test data as formatted .csv (see jobaid for more info on formatting)
+dat <- read.csv("dummy_mortality_data.csv", stringsAsFactors = FALSE)
+
+#Select variables
+#Unsure of all variables (i.e Cause 1-5)
+req.col <- c("date",
+             "age",
+             "zip",
+             "tract",
+             "sex",
+             "man_uc",
+             "manner", 
+             "acme_uc")
+
+# Standardizing case for text variables
+dat <- dat %>%
+  mutate(
+    sex = toupper(sex),
+    acme_uc = toupper(acme_uc),
+    manner = toupper(manner), 
+    man_uc = toupper(man_uc)
+  )
+
+# Recoding missing "" values as NA
+dat <-
+  cbind(dat[, -which(names(dat) %in% c("sex", "man_uc", "manner", "acme_uc"))],
+        apply(dat[, c("sex", "man_uc", "manner", "acme_uc")], 2, function(x) {
+          na_if(x, "")
+        }))
+
+# Checking levels of categorical variables
+if (class(dat$age) %in% c("integer", "numeric") == FALSE) { # Age should be numeric
+  warning("ERROR: Misformatted 'age' column - reformat as numeric or integer")
+} else if (length(unique(dat$sex[!is.na(dat$sex)])) != 2 &&
+           all(unique(dat$sex[!is.na(dat$sex)]) %in% c("F", "M")) == FALSE) {
+  warning("ERROR: Misformatted 'sex' column - levels should be one of 'M', 'F' (case sensitive)")
+} else if (all(nchar(as.character(dat$zip[!is.na(dat$zip)])) == 5) == FALSE) {
+  warning("ERROR: Misformatted 'zip' column - entries should be 5-digit zip code")
+  }
+
+# Reformatting columns
+dat$zip <- as.integer(dat$zip)
+```
+
+```{r location, include = FALSE}
+#needed to obtain population estimates 
+key <- params$apikey
+state <- params$state
+county <- params$county
+scl <- as.integer(params$popscale)
+```
+
+```{r vars, include = FALSE}
+vars <- c(
+  "B01001_001E",
+  "B01001_002E",
+  "B01001_026E",
+  "B01001_003E",
+  "B01001_004E",
+  "B01001_005E",
+  "B01001_006E",
+  "B01001_007E",
+  "B01001_008E",
+  "B01001_009E",
+  "B01001_010E",
+  "B01001_011E",
+  "B01001_012E",
+  "B01001_013E",
+  "B01001_014E",
+  "B01001_015E",
+  "B01001_016E",
+  "B01001_017E",
+  "B01001_018E",
+  "B01001_019E",
+  "B01001_020E",
+  "B01001_021E",
+  "B01001_022E",
+  "B01001_023E",
+  "B01001_024E",
+  "B01001_025E",
+  "B01001_027E",
+  "B01001_028E",
+  "B01001_029E",
+  "B01001_030E",
+  "B01001_031E",
+  "B01001_032E",
+  "B01001_033E",
+  "B01001_034E",
+  "B01001_035E",
+  "B01001_036E",
+  "B01001_037E",
+  "B01001_038E",
+  "B01001_039E",
+  "B01001_040E",
+  "B01001_041E",
+  "B01001_042E",
+  "B01001_043E",
+  "B01001_044E",
+  "B01001_045E",
+  "B01001_046E",
+  "B01001_047E",
+  "B01001_048E",
+  "B01001_049E",
+  "B01001H_001E",
+  "B02001_003E",
+  "B02001_004E",
+  "B02001_005E",
+  "B02001_006E",
+  "B02001_007E",
+  "B02001_008E",
+  "B03003_002E",
+  "B03003_003E"
+)
+
+varlab <- c(
+  "totalpop",
+  "male",
+  "female",
+  "male0.5",
+  "male5.9",
+  "male10.14",
+  "male15.17",
+  "male18.19",
+  "male20",
+  "male21",
+  "male22.24",
+  "male25.29",
+  "male30.34",
+  "male35.39",
+  "male40.44",
+  "male45.49",
+  "male50.54",
+  "male55.59",
+  "male60.61",
+  "male62.64",
+  "male65.66",
+  "male67.69",
+  "male70.74",
+  "male75.79",
+  "male80.84",
+  "male.gt84",
+  "female0.5",
+  "female5.9",
+  "female10.14",
+  "female15.17",
+  "female18.19",
+  "female20",
+  "female21",
+  "female22.24",
+  "female25.29",
+  "female30.34",
+  "female35.39",
+  "female40.44",
+  "female45.49",
+  "female50.54",
+  "female55.59",
+  "female60.61",
+  "female62.64",
+  "female65.66",
+  "female67.69",
+  "female70.74",
+  "female75.79",
+  "female80.84",
+  "female.gt84",
+  "nhwhite",
+  "black",
+  "indian",
+  "asian",
+  "hawaiian",
+  "otherrace",
+  "gt1race",
+  "nothisp",
+  "hispanic"
+) #included race, but not included in analysis
+
+# FIPS code lookup for ZIP code lookup
+data(fips_codes)
+state_fips <- sprintf("%02d", as.numeric(fips_codes[fips_codes$state == toupper(state), ]$state_code[1]))
+county_fips <-
+  as.numeric(fips_codes[toupper(fips_codes$state) == toupper(state) &
+               toupper(fips_codes$county) == toupper(county), ]$county_code)
+
+# Looking up county ZIP codes
+temp <- tempdir()
+file <- tempfile(pattern = "file", tmpdir = tempdir(), fileext = ".csv")
+download.file("https://www2.census.gov/geo/docs/maps-data/data/rel/zcta_county_rel_10.txt",
+              destfile = file,
+              quiet = TRUE)
+zip.temp <- read.csv(file)
+zips <- as.character(sprintf("%05d", zip.temp[zip.temp$STATE == state_fips &
+                                                 zip.temp$COUNTY == county_fips,]$ZCTA5))
+rm(zip.temp)
+```
+
+```{r dem, include = FALSE}
+#obtain county estimates 
+pop <- map_df(2015:2019, function(x){
+  get_acs(
+  geography = "county",
+  variables = vars,
+  output = "wide",
+  year= x,
+  key = key,
+  state = state,
+  county = county,
+  survey = "acs5",
+  show_call = FALSE) %>% 
+   mutate(year = x)
+})
+
+pop2 <- as.data.frame(pop[, which(names(pop) %in% c("GEOID", "NAME", vars, "year"))])
+
+names(pop2) <- c("geoid", "name", varlab, "year")
+
+prevyr <- tail(pop2, n=1)
+prevyr <- select(prevyr, -year)
+
+pop2 <- pop2 %>% 
+  add_row(prevyr, year = 2020) %>% 
+  add_row(prevyr, year = 2021) 
+#assumes population stays the same over 2019-2021
+
+# Pulling ZIP code ACS data, subsetting for specified geography
+acs.zip <- map_df(2019, function(x)({
+  get_acs(geography = "zcta",
+          variables = vars,
+          year = x,
+          output = "wide",
+          state = state,
+          zcta = zips,
+          key = key,
+          survey = "acs5",
+          show_call = FALSE)
+}))
+
+acs.zip2 <- acs.zip[which(acs.zip$GEOID %in% as.character(zips)), ]
+acs.zip2 <- as.data.frame(acs.zip2[, which(names(acs.zip2) %in% c("GEOID", "NAME", vars))])
+names(acs.zip2) <- c("geoid","name", varlab)
+
+acs.zip2 <- acs.zip2 %>%
+  mutate(
+    age0.17 = male0.5 + male5.9 + male10.14 + male15.17 +
+      female0.5 + female5.9 + female10.14 + female15.17,
+    age18.29 = male18.19 + male20 + male21 + male22.24 + male25.29 +
+      female18.19 + female20 + female21 + female22.24 + female25.29,
+    age30.39 = male30.34 + male35.39 + female30.34 + female35.39,
+    age40.49 = male40.44 + male45.49 + female40.44 + female45.49,
+    age50.64 = male50.54 + male55.59 + male60.61 + male62.64 +
+      female50.54 + female55.59 + female60.61 + female62.64,
+    age65.74 = male65.66 + male67.69 + male70.74 +
+      female65.66 + female67.69 + female70.74,
+    age75.84 = male75.79 + male80.84 + female75.79 + female80.84,
+    age.gt84 = male.gt84 + female.gt84,
+    otherrace = hawaiian + otherrace + gt1race
+  )
+
+```
+
+```{r re-categorizing, warning = TRUE, include = FALSE}
+
+# Downloading census data
+pop.co <- as.data.frame(
+  get_acs(
+    geography = "county",
+    state = "MD",
+    county = "Baltimore city",
+    variables = vars,
+    survey = "acs5",
+    year = 2019,
+    key = "2082857cc31cbba17def539b8ab26a66b4ff4090",
+    output = "wide"
+  )
+)#done twice for separate maps 
+
+pop.co<-
+  pop.co[, which(names(pop.co) %in% c("GEOID", "NAME", vars))]
+names(pop.co) <- c("GEOID", "NAME", varlab)
+
+# Recategorizing age groups
+pop<- pop.co %>%
+  mutate(age0.17 = male0.5 + male5.9 + male10.14 + male15.17 +
+      female0.5 + female5.9 + female10.14 + female15.17,
+    age18.29 = male18.19 + male20 + male21 + male22.24 + male25.29 +
+      female18.19 + female20 + female21 + female22.24 + female25.29,
+    age30.39 = male30.34 + male35.39 + female30.34 + female35.39,
+    age40.49 = male40.44 + male45.49 + female40.44 + female45.49,
+    age50.64 = male50.54 + male55.59 + male60.61 + male62.64 +
+      female50.54 + female55.59 + female60.61 + female62.64,
+    age65.74 = male65.66 + male67.69 + male70.74 +
+      female65.66 + female67.69 + female70.74,
+    age75.84 = male75.79 + male80.84 + female75.79 + female80.84,
+    age.gt84 = male.gt84 + female.gt84,
+    otherrace = hawaiian + otherrace + gt1race
+  )
+
+
+  dat <- dat %>%
+         mutate(age_cat = cut(age, breaks=c(0, 25, 45, 65, 75, 85, 200), right = FALSE),
+                age_cat_num = as.numeric(age_cat),
+                age_cat_num= ifelse(is.na(age_cat_num), 7, age_cat_num),
+                age_cat = factor(age_cat_num,
+                                 levels = 1:7,
+                                 labels = c("0-24", "25-44", "45-64", "65-74", "75-84", "85+", "Missing")),
+                age_wide_cat = cut(age, breaks = c(0, 18, 30, 40, 50, 65, 75, 85, 200), right = FALSE),
+                age_wide_cat_num = as.numeric(age_wide_cat),
+                age_wide_cat_num = ifelse(is.na(age_wide_cat_num), 9, age_wide_cat_num),
+                age_wide = factor(age_wide_cat_num,
+                                  levels = 1:9,
+                                  labels = c("0-17", "18-29", "30-39", "40-49", "50-64", "65-74", "75-84", "85+", "Missing")))
+  
+  
+```
+
+```{r death-manner, include = FALSE}
+#categorizing codes 
+  covid_causes_str <- c("COVID", "SARS", "CORONAVIRUS", "CORONA VIRUS", "CORONA-VIRUS")
+  covid_causes_str_coll <- paste(covid_causes_str, collapse="|")
+  covid_acme <- c("U071", "U072")
+  
+  # Cause of death categories
+  resp.cod <- c(paste0("J", sprintf("%02d", 9:18)), # Influenza & pneumonia
+                paste0("J", 40:47), # Chronic LRD
+                paste0("J", sprintf("%02d", 0:6)),
+                paste0("J", 20:39),
+                paste0("J", 60:70),
+                paste0("J", 80:86),
+                paste0("J", 90:96),
+                paste0("J", 97:99),
+                "R092", "U04")
+  resp.cod.coll <- paste(resp.cod, collapse = "|")
+  circ.cod <- c(paste0("I", 10:15),
+                paste0("I", 20:25),
+                "I50",
+                paste0("I", 50:69),
+                paste0("I", sprintf("%02d", 0:9)),
+                paste0("I", 26:49),
+                paste0("I", 51:52),
+                paste0("I", 70:99))
+  circ.cod.coll <- paste(circ.cod, collapse = "|")
+  neo.cod <- paste0("C", sprintf("%02d", 0:97))
+  neo.cod.coll <- paste(neo.cod, collapse = "|")
+  dem.cod <- c("G30", "G31", "F01", "F03")
+  dem.cod.coll <- paste(dem.cod, collapse = "|")
+  sel.cod <- c(paste0("E", 10:14),
+               paste0("N", 17:19),
+               paste0("A", 40:41))
+  sel.cod.coll <- paste(sel.cod, collapse = "|")
+  nat.cod <- c(paste0("A", sprintf("%02d", 0:39)),
+               paste0("A", 42:99),
+               paste0("B", sprintf("%02d", 0:99)),
+               paste0("D", sprintf("%02d", 0:99)),
+               paste0("E", sprintf("%02d", 0:7)),
+               paste0("E", 15:68),
+               paste0("E", 70:90),
+               "F00",
+               paste0("F", sprintf("%02d", 4:99)),
+               paste0("G", sprintf("%02d", 0:26)),
+               paste0("G", 32:99),
+               paste0("H", sprintf("%02d", 0:95)),
+               paste0("K", sprintf("%02d", 0:93)),
+               paste0("L", sprintf("%02d", 0:99)),
+               paste0("M", sprintf("%02d", 0:99)),
+               paste0("N", sprintf("%02d", 0:16)),
+               paste0("N", 20:98),
+               paste0("O", sprintf("%02d", 0:99)),
+               paste0("P", sprintf("%02d", 0:96)),
+               paste0("Q", sprintf("%02d", 0:99)))
+  nat.cod.coll <- paste(nat.cod, collapse = "|")
+  ext.cod <- c(paste0("S", sprintf("%02d", 0:99)),
+               paste0("T", sprintf("%02d", 0:98)),
+               paste0("U", sprintf("%02d", 0:4)),
+               paste0("V", sprintf("%02d", 0:99)),
+               paste0("W", sprintf("%02d", 0:99)),
+               paste0("x", sprintf("%02d", 0:99)),
+               paste0("Y", sprintf("%02d", 0:98)))
+  mva.cod <- c(paste0("V",
+                      paste0(sprintf("%02d", rep(c(2:6),
+                                                 each = 2)),
+                             c(1, 9))),
+               "V092",
+               "V093",
+               paste0("V", 20:29),
+               "V304",
+               paste0("V", paste0(rep(30:79, each = 5), 5:9)),
+               paste0("V", 860:863, 1),
+               paste0("V", 87:89))
+  etoh.cod <- c("F10")
+  ext.cod.coll <- paste(ext.cod, collapse = "|")
+  suicide.cod.coll <- paste0("X", 60:84, collapse = "|")
+  homicide.cod.coll <- paste(c(
+    paste0("X", 85:99),
+    paste0("Y", sprintf("%02d", 0:9))),
+    collapse = "|"
+  )
+  od.cod.coll <- paste(c(
+    paste0("X", 40:49),
+    paste0("Y", 10:19)),
+    collapse = "|")
+  mva.cod.coll <- paste0(mva.cod, collapse = "|")
+  etoh.cod.coll <- etoh.cod
+
+  pneumonia_codes = paste0("J", 12:18)
+  influenza_codes = paste0("J09", "J10", "J11")
+  
+# Replacing NA with "" in ACME_UC (test)
+  narepcol <- c("acme_uc",
+             "man_uc")
+  dat[, narepcol][is.na(dat[, narepcol])] <- ""
+  
+  dat <- dat %>%
+         mutate(
+           death_naturalmanner = ifelse(manner=="N", 1, 0),
+           death_externalmanner = ifelse(manner=="A" | manner=="S" | manner=="H", 1, 0),
+           death_covid_primary = ifelse(
+             acme_uc %in% covid_acme, 
+             1, 
+             0),
+           death_covid_coded = ifelse(
+             acme_uc %in% covid_acme,
+             1,
+             0
+           ),
+           death_covid_any = ifelse(
+              acme_uc %in% covid_acme, 
+              1, 
+              0
+            ),
+           death_pneumonoia_primary = ifelse(
+             acme_uc %in% pneumonia_codes,
+             1,
+             0
+           ),
+           death_infl_primary = ifelse(
+             acme_uc %in% influenza_codes,
+             1,
+             0
+           ),
+           death_respiratory = ifelse(
+             grepl(resp.cod.coll, acme_uc),
+             1,
+             0
+           ),
+           death_circulatory = ifelse(
+             grepl(circ.cod.coll, acme_uc),
+             1,
+             0
+           ),
+           death_neoplasm = ifelse(
+             grepl(neo.cod.coll, acme_uc),
+             1,
+             0
+           ),
+           death_dementia = ifelse(
+             grepl(dem.cod.coll, acme_uc),
+             1,
+             0
+           ),
+           death_otherselect = ifelse(
+             grepl(sel.cod.coll, acme_uc),
+             1,
+             0
+           ),
+           death_natural = ifelse(
+             grepl(nat.cod.coll, acme_uc),
+             1,
+             0
+           ),
+           death_external = ifelse(
+             grepl(ext.cod.coll, acme_uc),
+             1,
+             0
+           ),
+           death_suicide = ifelse(
+             grepl(suicide.cod.coll, acme_uc),
+             1,
+             0
+           ),
+           death_homicide = ifelse(
+             grepl(homicide.cod.coll, acme_uc),
+             1,
+             0
+           ),
+           death_overdose = ifelse(
+             grepl(od.cod.coll, acme_uc),
+             1,
+             0
+           ),
+           death_mva = ifelse(
+             grepl(mva.cod.coll, acme_uc),
+             1,
+             0
+           ),
+           death_etoh = ifelse(
+             grepl(etoh.cod.coll, acme_uc),
+             1,
+             0
+           )
+          ) %>%
+    mutate(
+      cause_of_death = case_when(
+        death_covid_primary == 1 ~ "COVID-19",
+        death_respiratory == 1 ~ "Respiratory",
+        death_circulatory == 1 ~ "Circulatory",
+        death_neoplasm == 1 ~ "Cancer",
+        death_dementia == 1 ~ "Dementia",
+        death_otherselect == 1 ~ "Diabetes, Renal, Sepsis",
+        death_natural == 1 ~ "Other Natural",
+        death_external == 1 ~ "Other External"),
+      death_selfharm = ifelse(
+        death_suicide + death_overdose > 0,
+        1,
+        0
+        )) %>%
+    mutate(
+      external_subcause = ifelse(
+        death_external == 1,
+        case_when(
+          death_homicide == 1 ~ "Homicide",
+          death_selfharm == 1 ~ "Suicide / Overdose",
+          death_mva == 1 ~ "MVA",
+          death_etoh == 1 ~ "Alcohol",
+          TRUE ~ "Other Injury"),
+        NA)) %>%
+    mutate(
+      death_injury = ifelse(
+        external_subcause == "Other Injury",
+        1,
+        0
+      )
+    )
+  
+```
+
+```{r format, include =  FALSE}
+
+# Standardizing week.year format
+dat <- dat %>%
+         mutate(year = lubridate::year(date),
+                week = epiweek(date))
+
+
+dat$isodate <- as.Date(ISOweek2date(paste0(dat$year,
+                                           "-W",
+                                           sprintf("%02d", dat$week),
+                                           "-1")) - 1)
+dat$yearweek <- paste( dat$year,dat$week, sep = ".")
+dat$week.year <- paste( dat$week, dat$year,sep = ".")
+ 
+
+dat.cod <-
+  dat[dat$year > 2015 &
+        dat$isodate < as.Date(paste0("2022-01-01")) &
+        grepl("R", dat$acme_uc) == FALSE, ]
+# covid.any <- dat.cod[dat.cod$death_covid_any == 1,]
+# covid.prim <- dat.cod[dat.cod$death_covid_primary == 1,]
+
+# Recoding missing variables
+dat <- cbind(dat[, -which(names(dat) %in% c("age_wide", "sex", "zip"))],
+              apply(dat[, c("age_wide", "sex",  "zip")], 2, function(x) {
+  recode(na_if(x, ""), .missing = "unknown")
+  }))
+
+```
+
+
+```{r weekly-counts, warning = TRUE, include = FALSE}
+# Framework for list of weeks
+dayseq <- seq.Date(from = min(dat$isodate, na.rm = TRUE),
+                   to = max(dat$isodate, na.rm = TRUE),
+                   by = "day")
+year.week <- unique(paste(isoWeekYear(dayseq - 1)[[1]], sprintf("%02d", isoWeekYear(dayseq - 1)[[2]]), sep = "."))
+year.week <- year.week[order(year.week)]
+
+mort.temp <- as.data.frame(list(
+  yearweek = year.week,
+  year = substr(year.week, start = 1, stop = 4),
+  week = substr(year.week, start = 6, stop = 7),
+  weekstart = ISOweek2date(paste(str_replace(year.week, pattern = "[.]", replacement = "-W"), 1, sep = "-")),
+  weekseq = seq_along(year.week),
+  deaths = NA))
+
+# Overall weekly estimated covid mortality count
+mort.cov <- mort.temp
+temp <- dat[dat$death_covid_any == 1, ]
+for (ii in seq_len(nrow(mort.cov))) {
+  mort.cov$deaths[ii] <- nrow(dat[dat$yearweek == mort.cov$yearweek[ii] & !is.na(dat$yearweek), ])
+  mort.cov$covid[ii] <- nrow(temp[temp$yearweek == mort.cov$yearweek[ii] & !is.na(temp$yearweek), ])
+}
+rm(temp)
+
+```
+
+
+```{r recent, include = FALSE}
+wk <- format(max(mort.temp$weekstart), "%m/%d/%Y")
+wk2 <- format(max(mort.temp$weekstart) + 6, "%m/%d/%Y")
+newcovid <- mort.cov[mort.cov$weekstart == max(mort.temp$weekstart), ]$covid
+newdeaths <- mort.cov[mort.cov$weekstart == max(mort.cov$weekstart), ]$deaths
+```
+
+
+```{r analysis, include = FALSE}
+#https://github.com/kjhealy/us_mortality_cdc/blob/master/mortality.Rmd
+
+df_yr <- dat %>%
+  filter(year > 2014,
+         week >= 1 &
+         week <= 53) %>%
+  group_by(cause_of_death, year) %>%
+  summarise(period_deaths = sum(n(), na.rm = TRUE))
+
+baseline_deaths <- dat %>%
+  filter(year %in% c(2015:2019),
+         week >= 1 &
+         week <= 53) %>%
+  group_by(year, cause_of_death) %>%
+  summarise(total_n = sum(n(), na.rm = TRUE)) %>%
+  group_by(cause_of_death)%>%
+  summarise(baseline = mean(total_n, na.rm = TRUE),
+            baseline_sd = sd(total_n, na.rm = TRUE))
+
+
+df_excess <- left_join(df_yr, baseline_deaths) %>%
+  mutate(excess = period_deaths - baseline,
+         pct_excess = (excess / period_deaths)*100,
+         pct_sd = (baseline_sd/baseline)*100) %>%
+  rename(deaths = period_deaths)
+
+df_meds <- df_excess %>%
+  summarize(med = median(pct_excess))
+
+df_sd <- df_excess %>%
+  filter(cause_of_death %in% c("COVID-19", "Respiratory", "NA", "Cancer", "Other Natural", "Other External")) %>%
+  group_by(cause_of_death) %>%
+  slice(1) %>%
+  select(cause_of_death, pct_sd) %>%
+  mutate(lwr = -2*pct_sd,
+         upr = 2*pct_sd) %>%
+  left_join(df_meds)
+
+```
+
+```{r, include = FALSE}
+#Overall Excess Death Time Series 
+
+xsfx <- function(x) {
+  y <- x[x$death_covid_any == 1, ]
+  
+  # Weekly count frame work
+  nyear <- length(unique(x$year))
+  yearfrom <- min(x$year, na.rm = TRUE)
+  yearto <-max(x$year, na.rm = TRUE)
+  
+  start <- ISOweek2date(paste0(yearfrom, "-W01-1"))
+  end <- ISOweek2date(paste0(yearto, "-W53-7"))
+  wk.dates <- seq.Date(from = start,
+                       to = end,
+                       by = "week")
+  
+  d.all <- as.data.frame(list(
+    week = isoweek(wk.dates),
+    year = isoyear(wk.dates),
+    week.year = paste(isoweek(wk.dates),
+                      isoyear(wk.dates),
+                      sep = "."),
+    all = NA,
+    covid = NA
+  ))
+  
+  # Counting total and COVID deaths per week (entire period)
+  for (ii in seq_len(nrow(d.all))) {
+    d.all$all[ii] <- nrow(x[x$week.year == d.all$week.year[ii],])
+    d.all$covid[ii] <-
+      nrow(y[y$week.year == d.all$week.year[ii],])
+  }
+  
+  d.all <- d.all %>%
+    mutate(noncovid = all - covid)
+  
+  # Subsetting to base period
+  d.base <- d.all[d.all$year < 2020, ]
+  
+  # Calculating expected number of weekly deaths (based on baseline)
+  d.exp <- as.data.frame(list(
+    week = 1:53,
+    exp = NA,
+    l.95 = NA,
+    u.95 = NA,
+    mean = NA
+  ))
+  
+  # Mean
+  for (ii in seq_len(nrow(d.exp) - 1)) {
+    d.exp$mean[ii] <-
+      mean(d.base[d.base$week == d.exp$week[ii], ]$all, na.rm = TRUE)
+  }
+  d.exp[d.exp$week == 53, ]$mean <- mean(d.exp[d.exp$week == 1 |
+                                                 d.exp$week == 52, ]$mean)
+  
+  # 3 week moving average & 95% CI
+  sefx <- function(x) {
+    sqrt(var(x, na.rm = TRUE) / length(x))
+  }
+  
+  for (ii in seq_len(nrow(d.exp))) {
+    # Moving average window for week 1
+    if (ii == 1) {
+      d.exp$exp[ii] <-
+        mean(d.base[d.base$week <= 2 |
+                      d.base$week == 52, ]$all, na.rm = TRUE)
+      d.exp$l.95[ii] <-
+        d.exp$exp[ii] - 1.96 * sefx(d.base[d.base$week <= 2 |
+                                             d.base$week == 52, ]$all)
+      d.exp$u.95[ii] <-
+        d.exp$exp[ii] + 1.96 * sefx(d.base[d.base$week <= 2 |
+                                             d.base$week == 52, ]$all)
+    }
+    # Moving average window for week 52
+    else if (ii == 52) {
+      d.exp$exp[ii] <- mean(d.base[d.base$week == 51 |
+                                     d.base$week == 52 |
+                                     d.base$week == 1, ]$all, na.rm = TRUE)
+      d.exp$l.95[ii] <-
+        d.exp$exp[ii] - 1.96 * sefx(d.base[d.base$week == 51 |
+                                             d.base$week == 52 |
+                                             d.base$week == 1, ]$all)
+      d.exp$u.95[ii] <-
+        d.exp$exp[ii] + 1.96 * sefx(d.base[d.base$week == 51 |
+                                             d.base$week == 52 |
+                                             d.base$week == 1, ]$all)
+    }
+    # Moving average window for week 53
+    else if (ii == 53) {
+      d.exp[d.exp$week == 53, ]$exp <- mean(d.base[d.base$week == 1 |
+                                                     d.base$week == 2 |
+                                                     d.base$week == 51 |
+                                                     d.base$week == 52, ]$all, na.rm = TRUE)
+      d.exp[d.exp$week == 53, ]$l.95 <-
+        d.exp[d.exp$week == 53, ]$exp - 1.96 * sefx(d.base[d.base$week == 1 |
+                                                             d.base$week == 2 |
+                                                             d.base$week == 51 |
+                                                             d.base$week == 52, ]$all)
+      d.exp[d.exp$week == 53, ]$u.95 <-
+        d.exp[d.exp$week == 53, ]$exp + 1.96 * sefx(d.base[d.base$week == 1 |
+                                                             d.base$week == 2 |
+                                                             d.base$week == 51 |
+                                                             d.base$week == 52, ]$all)
+    }
+    # Moving average window for weeks 2-51
+    else {
+      d.exp$exp[ii] <-
+        mean(d.base[abs(d.base$week - ii) <= 1, ]$all, na.rm = TRUE)
+      d.exp$l.95[ii] <-
+        d.exp$exp[ii] - 1.96 * sefx(d.base[abs(d.base$week - ii) <= 1, ]$all)
+      d.exp$u.95[ii] <-
+        d.exp$exp[ii] + 1.96 * sefx(d.base[abs(d.base$week - ii) <= 1, ]$all)
+    }
+  }
+  
+  # Comparing observed new deaths to expected deaths
+  d.obs <- merge(d.all[d.all$year >= 2020, ], d.exp, by = "week")
+  d.obs <- d.obs[with(d.obs, order(year, week)), ]
+  
+  # Plotting 2020-2021 excess deaths (stacked area)
+  plot.obs <- reshape2::melt(
+    d.obs,
+    id.vars = c("week", "week.year", "year"),
+    measure.vars = c("covid", "noncovid"),
+    variable.name = "cause",
+    value.name = "count"
+  )
+  plot.obs <- plot.obs %>%
+    mutate(date = as.Date(ISOweek::ISOweek2date(paste0(
+      year,
+      "-W",
+      sprintf("%02d", week),
+      "-1"
+    ))))
+  
+  plot.exp <- reshape2::melt(
+    d.obs,
+    id.vars = c("week", "week.year", "year"),
+    measure.vars = c("exp", "l.95", "u.95"),
+    variable.name = "type",
+    value.name = "value"
+  )
+  plot.exp <- plot.exp %>%
+    mutate(date = as.Date(ISOweek::ISOweek2date(paste0(
+      year,
+      "-W",
+      sprintf("%02d", week),
+      "-1"
+    ))))
+  plot.exp$type2 <- factor(
+    plot.exp$type,
+    labels = c(
+      "3 Week Moving Average (2016-2019)",
+      "95% Confidence Interval",
+      "u.95"
+    )
+  )
+  
+  plotout <- ggplot(data = plot.obs,
+                    aes(x = date,
+                        y = count)) +
+    theme_classic() +
+    geom_area(aes(fill = cause),
+              stat = "identity",
+              alpha = 0.3) +
+    geom_area(aes(col = cause),
+              fill = NA) +
+    geom_line(data = plot.exp,
+              aes(x = date,
+                  y = value,
+                  linetype = type),
+              lwd = 1) +
+    geom_line(data = plot.exp[plot.exp$type == "u.95", ],
+              aes(x = date,
+                  y = value),
+              lty = "dotted",
+              lwd = 1) +
+    scale_x_date(
+      date_breaks = "1 month",
+      date_minor_breaks = "1 week",
+      date_labels = "%b %Y"
+    ) +
+    
+    scale_color_manual(
+      name = "Observed Cause of Death",
+      limits = c("covid", "noncovid"),
+      values = c("#07008c", "grey10"),
+      labels = c("COVID-19", "Non-COVID-19")
+    ) +
+    scale_fill_manual(
+      name = "Observed Cause of Death",
+      limits = c("covid", "noncovid"),
+      values = c("#07008c", "grey30"),
+      labels = c("COVID-19", "Non-COVID-19")
+    ) +
+    scale_linetype_manual(
+      name = "Expected Deaths",
+      breaks = c("exp", "l.95"),
+      values = c("solid", "dotted", "dotted"),
+      labels = c("3 Week Moving\nAverage 2016-2019",
+                 "95% CI")
+    ) +
+    labs(x = "Time",
+         y = "Weekly Deaths",
+         title = paste0("Overall Excess Death Time Series"),
+         subtitle = "Figure 2") +
+    theme(plot.title = element_text(hjust = 0.5),
+          axis.text.x = element_text(angle = 45, hjust = 1))
+  
+  out <- list(d.obs, plotout)
+  return(out)
+}
+
+allcausexs <- xsfx(dat.cod)
+
+
+```
+
+
+```{r causeplot, include=FALSE}
+#Cause Specific Excess Death Time Series (excl COVID) 
+
+causeplotfx <- function(x, var, lab) {
+  x <- x[x[, var] == 1,]
+
+  nyear <-
+    length(unique(x$year))
+  yearfrom <-
+    min(x$year, na.rm = TRUE)
+  yearto <-
+    max(x$year, na.rm = TRUE)
+
+  start <- ISOweek2date(paste0(yearfrom,
+                               "-W01-1"))
+  end <- ISOweek2date(paste0(yearto, "-W52-7"))
+  wk.dates <- seq.Date(from = start,
+                       to = end,
+                       by = "week")
+
+  y <- as.data.frame(list(
+    week = isoweek(wk.dates),
+    year = isoyear(wk.dates),
+    week.year = paste(isoweek(wk.dates),
+                      isoyear(wk.dates),
+                      sep = "."),
+    deaths = NA
+  ))
+
+  for (ii in seq_len(nrow(y))) {
+    y$deaths[ii] <- nrow(x[x$week.year == y$week.year[ii], ])
+  }
+
+  # Subsetting to base period
+  base <- y[y$year < 2020,]
+
+  # Calculating expected number of weekly deaths (based on baseline)
+  d.exp <- as.data.frame(list(
+    week = 1:53,
+    exp = NA,
+    l.95 = NA,
+    u.95 = NA,
+    mean = NA
+  ))
+
+  # Mean
+  for (ii in seq_len(nrow(d.exp) - 1)) {
+    d.exp$mean[ii] <-
+      mean(base[base$week == d.exp$week[ii],]$deaths, na.rm = TRUE)
+  }
+  d.exp[d.exp$week == 53,]$mean <- mean(d.exp[d.exp$week == 1 |
+                                                d.exp$week == 52,]$mean)
+
+  # 3 week moving average & 95% CI
+  sefx <- function(x) {
+    sqrt(var(x, na.rm = TRUE) / length(x))
+  }
+
+  for (ii in seq_len(nrow(d.exp))) {
+    # Moving average window for week 1
+    if (ii == 1) {
+      d.exp$exp[ii] <-
+        mean(base[base$week <= 2 |
+                    base$week == 52,]$deaths, na.rm = TRUE)
+      d.exp$l.95[ii] <-
+        d.exp$exp[ii] - 1.96 * sefx(base[base$week <= 2 |
+                                           base$week == 52,]$deaths)
+      d.exp$u.95[ii] <-
+        d.exp$exp[ii] + 1.96 * sefx(base[base$week <= 2 |
+                                           base$week == 52,]$deaths)
+    }
+    # Moving average window for week 52
+    else if (ii == 52) {
+      d.exp$exp[ii] <- mean(base[base$week == 51 |
+                                   base$week == 52 |
+                                   base$week == 1,]$deaths, na.rm = TRUE)
+      d.exp$l.95[ii] <-
+        d.exp$exp[ii] - 1.96 * sefx(base[base$week == 51 |
+                                           base$week == 52 |
+                                           base$week == 1,]$deaths)
+      d.exp$u.95[ii] <-
+        d.exp$exp[ii] + 1.96 * sefx(base[base$week == 51 |
+                                           base$week == 52 |
+                                           base$week == 1,]$deaths)
+    }
+    # Moving average window for week 53
+    else if (ii == 53) {
+      d.exp[d.exp$week == 53,]$exp <- mean(base[base$week == 1 |
+                                                  base$week == 2 |
+                                                  base$week == 51 |
+                                                  base$week == 52,]$deaths, na.rm = TRUE)
+      d.exp[d.exp$week == 53,]$l.95 <-
+        d.exp[d.exp$week == 53,]$exp - 1.96 * sefx(base[base$week == 1 |
+                                                          base$week == 2 |
+                                                          base$week == 51 |
+                                                          base$week == 52,]$deaths)
+      d.exp[d.exp$week == 53,]$u.95 <-
+        d.exp[d.exp$week == 53,]$exp + 1.96 * sefx(base[base$week == 1 |
+                                                          base$week == 2 |
+                                                          base$week == 51 |
+                                                          base$week == 52,]$deaths)
+    }
+    # Moving average window for weeks 2-51
+    else {
+      d.exp$exp[ii] <-
+        mean(base[abs(base$week - ii) <= 1,]$deaths, na.rm = TRUE)
+      d.exp$l.95[ii] <-
+        d.exp$exp[ii] - 1.96 * sefx(base[abs(base$week - ii) <= 1,]$deaths)
+      d.exp$u.95[ii] <-
+        d.exp$exp[ii] + 1.96 * sefx(base[abs(base$week - ii) <= 1,]$deaths)
+    }
+  }
+
+  # Comparing observed new deaths to expected deaths
+  d.obs <- merge(y[y$year >= 2020,], d.exp, by = "week")
+  d.obs <- d.obs[with(d.obs, order(year, week)),]
+
+  # Plotting 2020-2021 excess deaths (stacked area)
+  d.obs <- d.obs %>%
+    mutate(date = as.Date(ISOweek::ISOweek2date(paste0(
+      year,
+      "-W",
+      sprintf("%02d", week),
+      "-1"
+    ))) - 1)
+  d.obs$plotcode <- "all"
+
+  plot.exp <- reshape2::melt(
+    d.obs,
+    id.vars = c("week", "week.year", "year"),
+    measure.vars = c("exp", "l.95", "u.95"),
+    variable.name = "type",
+    value.name = "value"
+  )
+  plot.exp <- plot.exp %>%
+    mutate(date = as.Date(ISOweek::ISOweek2date(paste0(
+      year,
+      "-W",
+      sprintf("%02d", week),
+      "-1"
+    ))) - 1)
+
+
+  out <- ggplot(data = d.obs,
+                aes(x = date,
+                    y = deaths)) +
+    theme_classic() +
+    geom_area(aes(fill = plotcode),
+              stat = "identity",
+              alpha = 0.3) +
+    geom_line(data = plot.exp,
+              aes(x = date,
+                  y = value,
+                  linetype = type),
+              lwd = 1) +
+    geom_line(data = plot.exp[plot.exp$type == "u.95",],
+              aes(x = date,
+                  y = value),
+              lty = "dotted",
+              lwd = 1) +
+    scale_x_date(
+      date_breaks = "1 month",
+      date_minor_breaks = "1 week",
+      date_labels = "%b %Y") +
+    scale_linetype_manual(
+      name = "Expected Deaths",
+      breaks = c("exp", "l.95"),
+      values = c("solid", "dotted", "dotted"),
+      labels = c("3 Week Moving\nAverage 2016-2019",
+                 "95% CI")) +
+    scale_fill_manual(
+      name = NULL,
+      limits = "all",
+      values = "grey10",
+      labels = "Observed Deaths") +
+    labs(
+      x = "Time",
+      y = "Weekly Deaths",
+      title = paste0("2020 - 2021 Non-COVID\n", lab, " Deaths")) +
+    theme(plot.title = element_text(hjust = 0.5),
+          axis.text.x = element_text(angle = 45, hjust = 1))
+  return(out)
+}
+
+xs.resp <- causeplotfx(x = dat.cod,
+                       var = "death_respiratory",
+                       lab = "Respiratory")
+xs.circ <- causeplotfx(x = dat.cod,
+                       var = "death_circulatory",
+                       lab = "Circulatory")
+xs.canc <- causeplotfx(x = dat.cod,
+                       var = "death_neoplasm",
+                       lab = "Malignant Neoplasm")
+xs.dem <- causeplotfx(x = dat.cod,
+                      var = "death_dementia",
+                      lab = "Dementia / Alzheimer")
+# xs.othsel <- causeplotfx(x = dat.cod,
+#                          var = "death_otherselect",
+#                          lab = "Other Select Cause")
+xs.othnat <- causeplotfx(x = dat.cod,
+                         var = "death_natural",
+                         lab = "Other Natural Cause")
+# xs.sh <- causeplotfx(x = dat.cod,
+#                      var = "death_selfharm",
+#                      lab = "Self-Harm")
+
+xs.arr <- ggarrange(xs.resp,
+  xs.circ,
+  xs.canc,
+  #xs.othsel, #uncomment later, just dont have the codes in my data 
+  xs.dem,
+  xs.othnat,
+  # xs.sh,
+  common.legend = TRUE,
+  legend = "top",
+  ncol = 2, 
+  nrow= 3,
+  labels = paste0("Figure", c(5:9))
+)
+```
+
+```{r, include=FALSE, }
+
+#Overall Excess by Age Time Series w/ COVID 
+
+ageplotfx <- function(x, agegrp) {
+   x <- x[x[, "age_wide"] == agegrp,]
+     y <- x[x$death_covid_any == 1, ]
+
+  # Weekly count frame work
+  nyear <- length(unique(x$year))
+  yearfrom <- min(x$year, na.rm = TRUE)
+  yearto <-max(x$year, na.rm = TRUE)
+
+  start <- ISOweek2date(paste0(yearfrom, "-W01-1"))
+  end <- ISOweek2date(paste0(yearto, "-W53-7"))
+  wk.dates <- seq.Date(from = start,
+                       to = end,
+                       by = "week")
+
+  d.all <- as.data.frame(list(
+    week = isoweek(wk.dates),
+    year = isoyear(wk.dates),
+    week.year = paste(isoweek(wk.dates),
+                      isoyear(wk.dates),
+                      sep = "."),
+    all = NA,
+    covid = NA
+  ))
+
+  # Counting total and COVID deaths per week (entire period)
+  for (ii in seq_len(nrow(d.all))) {
+    d.all$all[ii] <- nrow(x[x$week.year == d.all$week.year[ii],])
+    d.all$covid[ii] <-
+      nrow(y[y$week.year == d.all$week.year[ii],])
+  }
+
+  d.all <- d.all %>%
+    mutate(noncovid = all - covid)
+
+  # Subsetting to base period
+  d.base <- d.all[d.all$year < 2020, ]
+
+  # Calculating expected number of weekly deaths (based on baseline)
+  d.exp <- as.data.frame(list(
+    week = 1:53,
+    exp = NA,
+    l.95 = NA,
+    u.95 = NA,
+    mean = NA
+  ))
+
+  # Mean
+  for (ii in seq_len(nrow(d.exp) - 1)) {
+    d.exp$mean[ii] <-
+      mean(d.base[d.base$week == d.exp$week[ii], ]$all, na.rm = TRUE)
+  }
+  d.exp[d.exp$week == 53, ]$mean <- mean(d.exp[d.exp$week == 1 |
+                                                 d.exp$week == 52, ]$mean)
+
+  # 3 week moving average & 95% CI
+  sefx <- function(x) {
+    sqrt(var(x, na.rm = TRUE) / length(x))
+  }
+
+  for (ii in seq_len(nrow(d.exp))) {
+    # Moving average window for week 1
+    if (ii == 1) {
+      d.exp$exp[ii] <-
+        mean(d.base[d.base$week <= 2 |
+                      d.base$week == 52, ]$all, na.rm = TRUE)
+      d.exp$l.95[ii] <-
+        d.exp$exp[ii] - 1.96 * sefx(d.base[d.base$week <= 2 |
+                                             d.base$week == 52, ]$all)
+      d.exp$u.95[ii] <-
+        d.exp$exp[ii] + 1.96 * sefx(d.base[d.base$week <= 2 |
+                                             d.base$week == 52, ]$all)
+    }
+    # Moving average window for week 52
+    else if (ii == 52) {
+      d.exp$exp[ii] <- mean(d.base[d.base$week == 51 |
+                                     d.base$week == 52 |
+                                     d.base$week == 1, ]$all, na.rm = TRUE)
+      d.exp$l.95[ii] <-
+        d.exp$exp[ii] - 1.96 * sefx(d.base[d.base$week == 51 |
+                                             d.base$week == 52 |
+                                             d.base$week == 1, ]$all)
+      d.exp$u.95[ii] <-
+        d.exp$exp[ii] + 1.96 * sefx(d.base[d.base$week == 51 |
+                                             d.base$week == 52 |
+                                             d.base$week == 1, ]$all)
+    }
+    # Moving average window for week 53
+    else if (ii == 53) {
+      d.exp[d.exp$week == 53, ]$exp <- mean(d.base[d.base$week == 1 |
+                                                     d.base$week == 2 |
+                                                     d.base$week == 51 |
+                                                     d.base$week == 52, ]$all, na.rm = TRUE)
+      d.exp[d.exp$week == 53, ]$l.95 <-
+        d.exp[d.exp$week == 53, ]$exp - 1.96 * sefx(d.base[d.base$week == 1 |
+                                                             d.base$week == 2 |
+                                                             d.base$week == 51 |
+                                                             d.base$week == 52, ]$all)
+      d.exp[d.exp$week == 53, ]$u.95 <-
+        d.exp[d.exp$week == 53, ]$exp + 1.96 * sefx(d.base[d.base$week == 1 |
+                                                             d.base$week == 2 |
+                                                             d.base$week == 51 |
+                                                             d.base$week == 52, ]$all)
+    }
+    # Moving average window for weeks 2-51
+    else {
+      d.exp$exp[ii] <-
+        mean(d.base[abs(d.base$week - ii) <= 1, ]$all, na.rm = TRUE)
+      d.exp$l.95[ii] <-
+        d.exp$exp[ii] - 1.96 * sefx(d.base[abs(d.base$week - ii) <= 1, ]$all)
+      d.exp$u.95[ii] <-
+        d.exp$exp[ii] + 1.96 * sefx(d.base[abs(d.base$week - ii) <= 1, ]$all)
+    }
+  }
+
+  # Comparing observed new deaths to expected deaths
+  d.obs <- merge(d.all[d.all$year >= 2020, ], d.exp, by = "week")
+  d.obs <- d.obs[with(d.obs, order(year, week)), ]
+
+  # Plotting 2020-2021 excess deaths (stacked area)
+  plot.obs <- reshape2::melt(
+    d.obs,
+    id.vars = c("week", "week.year", "year"),
+    measure.vars = c("covid", "noncovid"),
+    variable.name = "cause",
+    value.name = "count"
+  )
+  plot.obs <- plot.obs %>%
+    mutate(date = as.Date(ISOweek::ISOweek2date(paste0(
+      year,
+      "-W",
+      sprintf("%02d", week),
+      "-1"
+    ))))
+
+  plot.exp <- reshape2::melt(
+    d.obs,
+    id.vars = c("week", "week.year", "year"),
+    measure.vars = c("exp", "l.95", "u.95"),
+    variable.name = "type",
+    value.name = "value"
+  )
+  plot.exp <- plot.exp %>%
+    mutate(date = as.Date(ISOweek::ISOweek2date(paste0(
+      year,
+      "-W",
+      sprintf("%02d", week),
+      "-1"
+    ))))
+  plot.exp$type2 <- factor(
+    plot.exp$type,
+    labels = c(
+      "3 Week Moving Average (2016-2019)",
+      "95% Confidence Interval",
+      "u.95"
+    )
+  )
+
+  plotout <- ggplot(data = plot.obs,
+                    aes(x = date,
+                        y = count)) +
+    theme_classic() +
+    geom_area(aes(fill = cause),
+              stat = "identity",
+              alpha = 0.3) +
+    geom_area(aes(col = cause),
+              fill = NA) +
+    geom_line(data = plot.exp,
+              aes(x = date,
+                  y = value,
+                  linetype = type),
+              lwd = 1) +
+    geom_line(data = plot.exp[plot.exp$type == "u.95", ],
+              aes(x = date,
+                  y = value),
+              lty = "dotted",
+              lwd = 1) +
+    scale_x_date(
+      date_breaks = "1 month",
+      date_minor_breaks = "1 week",
+      date_labels = "%b %Y"
+    ) +
+
+    scale_color_manual(
+      name = "Observed Cause of Death",
+      limits = c("covid", "noncovid"),
+      values = c("#07008c", "grey10"),
+      labels = c("COVID-19", "Non-COVID-19")
+    ) +
+    scale_fill_manual(
+      name = "Observed Cause of Death",
+      limits = c("covid", "noncovid"),
+      values = c("#07008c", "grey30"),
+      labels = c("COVID-19", "Non-COVID-19")
+    ) +
+    scale_linetype_manual(
+      name = "Expected Deaths",
+      breaks = c("exp", "l.95"),
+      values = c("solid", "dotted", "dotted"),
+      labels = c("3 Week Moving\nAverage 2016-2019",
+                 "95% CI")
+    ) +
+    labs(x = "Time",
+         y = "Weekly Deaths",
+         title = paste0("2020 - 2021\n", agegrp, " Deaths"))+
+    theme(plot.title = element_text(hjust = 0.5),
+          axis.text.x = element_text(angle = 45, hjust = 1))
+
+  out <- list(d.obs, plotout)
+  return(out)
+}
+
+xs.0_17 <- ageplotfx(x = dat.cod,
+                       agegrp = "0-17")
+xs.18_29 <- ageplotfx(x = dat.cod,
+                       agegrp = "18-29")
+xs.30_39 <- ageplotfx(x = dat.cod,
+                       agegrp = "30-39")
+xs.40_49 <- ageplotfx(x = dat.cod,
+                       agegrp = "40-49")
+xs.50_64 <- ageplotfx(x = dat.cod,
+                       agegrp = "50-64")
+xs.65_74 <- ageplotfx(x = dat.cod,
+                       agegrp = "65-74")
+xs.75_84 <- ageplotfx(x = dat.cod,
+                       agegrp = "75-84")
+xs.85p <- ageplotfx(x = dat.cod,
+                       agegrp = "85+")
+
+xs.age.arr <- ggarrange(
+  xs.0_17[[2]],
+  xs.18_29[[2]],
+  xs.30_39[[2]],
+  xs.40_49[[2]], 
+  xs.50_64[[2]],
+  xs.65_74[[2]],
+  xs.75_84[[2]],
+  xs.85p[[2]],
+  common.legend = TRUE,
+  legend = "top", 
+  nrow= 3, 
+  ncol = 2,
+  labels = paste0("Figure", c(11:19))
+)
+
+```
+
+```{r zipmap, include = FALSE}
+#Excess Mortality by ZIP 
+# Caching GIS shapefile downloads
+totalxsfx <- function(x) {
+  y <- xsfx(x)
+  y <- y[[1]]
+
+  total <- as.data.frame(
+    list(
+      covid = sum(y$covid),
+      all = sum(y$all),
+      exp = sum(y$exp),
+      exp.l95 = sum(y$l.95),
+      exp.u95 = sum(y$u.95))) %>%
+    mutate(
+      xs = all - exp,
+      xs.l95 = all - exp.u95,
+      xs.u95 = all - exp.l95
+    )
+
+
+  return(total)
+}
+
+options(tigris_use_cache = TRUE)
+
+# Population in city by ZIP (2018)
+zipadj <- acs.zip2
+
+# Downloading geographies
+co <- counties(state = state, )
+zip.all <- zctas(starts_with = as.character(zipadj$zip_code),
+                     cb = TRUE)
+cowater <- area_water(state = state, county = county)
+
+# Subsetting for county fips
+city <- co[co$COUNTYFP == county_fips,]
+
+# Reprojecting to  Stateplane (ft)
+zip.all.proj <- st_transform(zip.all, 2893)
+city.proj <- st_transform(city, crs = st_crs(zip.all.proj))
+water.proj <- st_transform(cowater, crs = st_crs(zip.all.proj))
+
+# Cropping zipcodes to county
+cozip <- st_intersection(zip.all.proj, city.proj) %>%
+  st_collection_extract("POLYGON")
+
+# Calculating excess mortality by ZIP code
+dat.zip <-
+  split(dat.cod, f = as.factor(sprintf("%05s", dat.cod$zip)))
+xs.zip.l <- lapply(dat.zip, totalxsfx)
+xs.zip <- bind_rows(xs.zip.l)
+xs.zip <- xs.zip %>%
+  mutate(zip = names(xs.zip.l))
+
+# Merging adjusted population counts with excess mortality
+xs.zip.pop <- merge(xs.zip, acs.zip2, by.x = "zip", by.y = "geoid", all.x = TRUE)
+
+# Censoring zipcodes with observed deaths < 50
+xs.zip.pop$pop.censor <- xs.zip.pop$all
+xs.zip.pop[xs.zip.pop$all < 50, ]$pop.censor <- NA
+
+# Calculating rates (excluding zip codes <50 deaths - too unstable)
+xs.zip.pop <- xs.zip.pop %>%
+  mutate(
+    xs10k = xs / pop.censor * 10000,
+    xs10k.l95 = xs.l95 / pop.censor * 10000,
+    xs10k.u95 = xs.u95 / pop.censor * 10000
+  )
+
+# Setting infinite rates to NA
+xs.zip.pop <- do.call(data.frame,
+                      lapply(xs.zip.pop,
+                             function(x) replace(x, is.infinite(x), NA)))
+
+# Merging zipcode excess with sf object
+xs.sf <- merge(cozip, xs.zip.pop, by.x = "GEOID10", by.y = "zip", all.x = TRUE)
+
+# Simple city border for visualization
+citysimp <- st_simplify(city.proj, dTolerance = 300)
+
+# Creating map of excess deaths by zipcode
+xs.map <- tm_shape(xs.sf,
+                   unit = "mi") +
+  tm_polygons("xs10k",
+          title = paste0("Excess Deaths per\n", scl/10 ,'Residents'),
+          palette = "Blues",
+          style = "cont",
+          border.col = "grey20") +
+  tm_compass(size = 1, position = c("center", "bottom")) +
+  tm_scale_bar(breaks = c(0, 0.5, 1, 2),
+               position = c("center", "bottom")) +
+  tm_layout(frame = FALSE, 
+            title = "Figure 4")
+
+zip <- tmap_leaflet(xs.map,mode = "view", show = FALSE, 
+                    add.titles = TRUE)
+
+
+```
+
+```{r excessmort, include = FALSE}
+#preparing data for excessmort
+
+df_line <- dat %>%
+  mutate(population = pop2$totalpop[match(dat$year, pop2$year)]) %>%
+  group_by(date, population) %>%
+  filter(year %in% c(2015:2021)) %>%
+  summarise(outcome = sum(n(), na.rm = TRUE))
+
+#convert lists into dataframe
+df_line <- as.data.frame(df_line)
+
+
+#formatting date
+df_line$date <- as.Date(df_line$date, format = "%Y-%m-%d")
+
+#exclude dates of pandemic to make baseline
+exclude_dates <- c(seq(make_date(2020,1,1), max(df_line$date), by = "day"))
+
+#fitting mean model
+model <- compute_expected(df_line, exclude = exclude_dates, keep.components = TRUE)
+
+#fitting excess model
+fit <- excess_model(model,
+             exclude = exclude_dates,
+             start = min(df_line$date),
+             end = max(df_line$date))
+```
+
+```{r table-form, include = FALSE}
+# Function for total observed & expected deaths (difference of weekly sums)
+# # All observed vs. expected deaths
+xs.all <- totalxsfx(dat.cod)
+
+# Observed vs. expected by subgroups (first element: by week, second
+# element: 2020-2021Q1 totals)
+dat.age <- split(dat.cod, f = dat.cod$age_wide)
+xs.age.l <- lapply(dat.age, totalxsfx)
+dat.sex <- split(dat.cod, f = dat.cod$sex)
+xs.sex.l <- lapply(dat.sex, totalxsfx)
+
+# Defining self-harm cause of death
+#dat.cod[dat.cod$death_selfharm == 1, ]$cause_of_death <- "Self-Harm"
+
+dat.cause <- split(dat.cod, f = dat.cod$cause_of_death)
+xs.cause.l <- lapply(dat.cause, totalxsfx)
+
+
+# Extracting and combining subgroups
+xs.age <-
+  bind_rows(lapply(xs.age.l, function(x)
+    as.data.frame(x)))
+xs.age <- xs.age %>%
+  mutate(group = "age",
+         subgroup = names(xs.age.l))
+xs.sex <-
+  bind_rows(lapply(xs.sex.l, function(x)
+    as.data.frame(x)))
+xs.sex <- xs.sex %>%
+  mutate(group = "sex",
+         subgroup = names(xs.sex.l))
+xs.cause <-
+  bind_rows(lapply(xs.cause.l, function(x)
+    as.data.frame(x)))
+xs.cause <- xs.cause %>%
+  mutate(group = "cause",
+         subgroup = names(xs.cause.l))
+
+# Adding available 2019 ACS5 denominators to subgroups
+xs.all$pop <- pop.co$totalpop
+xs.age$pop <- c(as.numeric(pop[, c(
+  "age0.17",
+  "age18.29",
+  "age30.39",
+  "age40.49",
+  "age50.64",
+  "age65.74",
+  "age75.84",
+  "age.gt84"
+  )]),
+  NA)
+# xs.sex$pop <-c(as.numeric(pop.co[, c("female",
+#                                       "male")]), NA)
+xs.sex<- xs.sex %>% 
+  mutate(pop = ifelse(subgroup =="F", pop.co$female,
+                      ifelse(subgroup == "M", pop.co$male, 
+                             ifelse(NA))))
+
+# Calculating mortality ratio & 95% CI
+mrfx <- function(x) {
+  mr <- rep(NA, nrow(x))
+  mr.ll <- rep(NA, nrow(x))
+  mr.ul <- rep(NA, nrow(x))
+
+  for (ii in seq_along(mr)) {
+    mr[ii] <- x$all[ii] / x$exp[ii]
+    mr.ll[ii] <- x$all[ii] / x$exp.u95[ii]
+    mr.ul[ii] <- x$all[ii] / x$exp.l95[ii]
+  }
+
+  out <- as.data.frame(list(
+    mr = mr,
+    mr.ll = mr.ll,
+    mr.ul = mr.ul
+  ))
+
+  return(out)
+}
+
+all.mr <- mrfx(xs.all)
+
+age.mr <- mrfx(xs.age)
+age.mr <- age.mr %>%
+  mutate(
+    subgroup = names(dat.age))
+
+sex.mr <- mrfx(xs.sex)
+sex.mr <- sex.mr %>%
+  mutate(
+    subgroup = names(dat.sex))
+
+cause.mr <- mrfx(xs.cause)
+cause.mr <- cause.mr %>%
+  mutate(
+    subgroup = names(dat.cause))
+
+# Merging subelements for table
+tab.all <- cbind(xs.all, all.mr)
+tab.all <- tab.all %>%
+  mutate(
+    group = "all",
+    subgroup = "all"
+  )
+tab.age <- merge(xs.age, age.mr, by = "subgroup")
+tab.sex <- merge(xs.sex, sex.mr, by = "subgroup")
+tab.cause <- merge(xs.cause, cause.mr, by = "subgroup")
+
+tab1.dat <- bind_rows(tab.all, tab.age, tab.sex)
+tab1.dat <- tab1.dat %>%
+  mutate(
+    exp.ci = paste0(round(exp, 0),
+                    " (",
+                    round(exp.l95, 0),
+                    ", ",
+                    round(exp.u95, 0),
+                    ")"),
+    xs.ci = paste0(round(xs, 0),
+                   " (",
+                   round(xs.l95, 0),
+                   ", ",
+                   round(xs.u95, 0),
+                   ")"),
+    xs.rateci = paste0(sprintf("%.1f", round(xs / pop * 10000, 1)),
+                       " (",
+                       sprintf("%.1f", round(xs.l95 / pop * 10000, 1)),
+                       ", ",
+                       sprintf("%.1f", round(xs.u95 / pop * 10000, 1)),
+                       ")"),
+    mr.ci = paste0(sprintf("%.2f", round(mr, 2)),
+                   " (",
+                   sprintf("%.2f", round(mr.ll, 2)),
+                   ", ",
+                   sprintf("%.2f", round(mr.ul, 2)),
+                   ")")
+  )
+
+tab1.dat <- tab1.dat[, c("group",
+                         "subgroup",
+                         "all",
+                         "exp.ci",
+                         "xs.ci",
+                         "xs.rateci",
+                         "mr.ci")]
+
+table1 <- kbl(tab1.dat)
+
+
+#Table 2 (Excesses by Place and Cause of Death)
+
+tab2.dat <- bind_rows(tab.all, tab.cause)
+
+tab2.dat <- tab2.dat %>%
+  mutate(
+    exp.ci = paste0(round(exp, 0),
+                    " (",
+                    round(exp.l95, 0),
+                    ", ",
+                    round(exp.u95, 0),
+                    ")"),
+    xs.ci = paste0(round(xs, 0),
+                   " (",
+                   round(xs.l95, 0),
+                   ", ",
+                   round(xs.u95, 0),
+                   ")"),
+    mr.ci = paste0(sprintf("%.2f", round(mr, 2)),
+                   " (",
+                   sprintf("%.2f", round(mr.ll, 2)),
+                   ", ",
+                   sprintf("%.2f", round(mr.ul, 2)),
+                   ")")
+  )
+
+tab2.dat <- tab2.dat[, c("group",
+                         "subgroup",
+                         "all",
+                         "exp.ci",
+                         "xs.ci",
+                         "mr.ci")]
+
+tbl1 <- tab1.dat %>% 
+  kable(col.name= c("Group", "Subgroup", "Observed", "Expected", "Excess", "Excess Rate", "Mortality Rate"), caption = "Table 1: Observed and Excess Death by Age and Sex") %>% 
+  kable_styling(font_size = 10)
+
+tbl2 <- tab2.dat %>% 
+  knitr::kable(col.name= c("Group", "Subgroup", "Observed", "Expected", "Excess", "Mortality Rate"), caption = "Table 2: Observed and Excess Death by Cause of Death") %>% 
+  kable_styling(font_size = 10)
+
+```
+
+
+```{r excessplot, include= FALSE}
+excessplot <- function(fit, 
+                        title     = paste0("Deviations from Expected Mortality in ", county,', ', state), 
+                        ylim      = NULL,
+                        show.data = TRUE,
+                        alpha     = 0.05){
+
+  requireNamespace("ggplot2")
+
+  z <- qnorm(1 - alpha/2)
+
+
+  p <- with(fit, data.frame(date = date,
+                        y        = (observed - expected)/expected,
+                        increase = fitted,
+                        sd       = sd,
+                        se       = se)) %>%
+    ggplot(aes(date, y)) +
+    geom_ribbon(aes(ymin = increase - z * se, ymax = increase + z * se), alpha = 0.5, fill = "grey10") +
+    theme_classic()+
+    geom_hline(yintercept = 0) +
+    scale_y_continuous(labels = scales::percent) +
+    scale_x_date(breaks = "1 year",
+      date_labels = "%b %Y") +
+    labs(x = "Time",
+      y = "% increase from expected death rate",
+      title = title, 
+      subtitle = "Figure 3")
+    
+
+  if(show.data) p <- p + geom_point(alpha = 0.3)
+
+  if(!is.null(ylim)) p <- p + coord_cartesian(ylim = ylim)
+
+  return(p + geom_line(aes(y = increase), size=0.70, col="#3366FF"))
+}
+dev <- excessplot(fit)
+```
+
+```{r weeklydth, include=FALSE}
+ wkdth <-  dat %>% 
+  filter(cause_of_death %in% "COVID-19") %>%
+  group_by(isodate) %>%
+  summarise(deaths = n()) %>%
+  mutate(date = isodate) %>%
+  ggplot(aes(x = date, y = deaths)) + 
+  geom_col(fill = "gray10") + 
+  theme_classic()+
+  scale_x_date(date_breaks = "1 month", minor_breaks = "1 week", date_labels = "%b %y") + 
+  scale_y_continuous(labels = scales::comma) + 
+  labs(x = "Week of the Year", 
+       y = "Total Deaths", 
+       color = "Years",
+       subtitle = "Figure 1 \nRaw counts.",
+       title = paste0("Weekly deaths recorded as COVID-19", 
+                      "<br>", 
+                      "<sup>",
+                      "Figure 1", "</sup>")) + 
+  theme(axis.text.x=element_text(angle=60, hjust=1)) 
+
+```
+
+During the most recent 7-day period (`r wk`-`r wk2`), there were **`r newcovid`** new COVID-related deaths detected in **`r newdeaths`** actual deaths.
+
+*****
+
+```{r plot1, echo = FALSE, warning=FALSE, fig.height= 5}
+ggplotly(wkdth) 
+```
+ 
+***** 
+
+```{r plot3, fig.width = 10, fig.height = 5, echo = FALSE, warning=FALSE}
+allcausexs[[2]]
+```
+
+*****
+
+```{r plot2, echo = FALSE, warning=FALSE, fig.width= 10, fig.height= 4}
+dev
+```
+
+*****
+
+```{r tables, echo = FALSE, fig.width= 10}
+tbl1
+tbl2
+```
+
+*****
+
+```{r, echo = FALSE, fig.width= 8, fig.height= 5}
+zip
+```
+
+*****
+
+## Cause Specific Excess Death Time Series (excluding COVID)
+
+```{r plot4, echo = FALSE, fig.width= 10, fig.height= 10}
+xs.arr
+```
+
+*****
+
+## Age Specific Excess Death Time Series (including COVID)
+
+```{r plot5, echo = FALSE, fig.width= 10, fig.height= 10, message=FALSE}
+xs.age.arr  
+```
